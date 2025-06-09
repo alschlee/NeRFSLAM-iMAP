@@ -9,6 +9,7 @@ from functorch import vmap
 import argparse
 from cfg import Config
 import shutil
+import os
 
 if __name__ == "__main__":
     #############################################
@@ -31,14 +32,12 @@ if __name__ == "__main__":
     log_dir = args.logdir
     config_file = args.config
     save_ckpt = args.save_ckpt
+    
     os.makedirs(log_dir, exist_ok=True)  # saving logs
     shutil.copy(config_file, log_dir)
     cfg = Config(config_file)       # config params
     n_sample_per_step = cfg.n_per_optim
     n_sample_per_step_bg = cfg.n_per_optim_bg
-
-    # param for vis - 시각화 비활성화
-    print("Running without 3D visualization...")
 
     # set camera
     cam_info = cameraInfo(cfg)
@@ -211,6 +210,35 @@ if __name__ == "__main__":
                 Batch_N_input_pcs.append(input_pcs.reshape([input_pcs.shape[0] * input_pcs.shape[1], input_pcs.shape[2], input_pcs.shape[3]]))
                 Batch_N_sampled_z.append(sampled_z.reshape([sampled_z.shape[0] * sampled_z.shape[1], sampled_z.shape[2]]))
 
+                # # vis sampled points in open3D
+                # # sampled pcs
+                # pc = open3d.geometry.PointCloud()
+                # pc.points = open3d.utility.Vector3dVector(input_pcs.cpu().numpy().reshape(-1,3))
+                # open3d.visualization.draw_geometries([pc])
+                # rgb_np = rgb.cpu().numpy().astype(np.uint8).transpose(1,0,2)
+                # # print("rgb ", rgb_np.shape)
+                # # print(rgb_np)
+                # # cv2.imshow("rgb", rgb_np)
+                # # cv2.waitKey(1)
+                # depth_np = depth.cpu().numpy().astype(np.float32).transpose(1,0)
+                # twc_np = twc.cpu().numpy()
+                # rgbd = open3d.geometry.RGBDImage.create_from_color_and_depth(
+                #     open3d.geometry.Image(rgb_np),
+                #     open3d.geometry.Image(depth_np),
+                #     depth_trunc=max_depth,
+                #     depth_scale=1,
+                #     convert_rgb_to_intensity=False,
+                # )
+                # T_CW = np.linalg.inv(twc_np)
+                # # input image pc
+                # input_pc = open3d.geometry.PointCloud.create_from_rgbd_image(
+                #     image=rgbd,
+                #     intrinsic=intrinsic_open3d,
+                #     extrinsic=T_CW)
+                # input_pc.points = open3d.utility.Vector3dVector(np.array(input_pc.points) - obj_k.obj_center.cpu().numpy())
+                # open3d.visualization.draw_geometries([pc, input_pc])
+
+
         ####################################################
         # training
         assert len(Batch_N_input_pcs) > 0
@@ -304,11 +332,9 @@ if __name__ == "__main__":
 
 
         ####################################################################
-        # 메시 저장 (시각화 없이)
+        # mesh generation without live visualization
         if (((frame_id % cfg.n_vis_iter) == 0 or frame_id == dataset_len-1) or
             (cfg.live_mode and time.time()-last_frame_time>cfg.keep_live_time)) and frame_id >= 10:
-            
-            print(f"Saving meshes for frame {frame_id}...")
             
             for obj_id, obj_k in vis_dict.items():
                 bound = obj_k.get_bound(intrinsic_open3d)
@@ -324,9 +350,8 @@ if __name__ == "__main__":
                 # save to dir
                 obj_mesh_output = os.path.join(log_dir, "scene_mesh")
                 os.makedirs(obj_mesh_output, exist_ok=True)
-                mesh_filename = "frame_{}_obj{}.obj".format(frame_id, str(obj_id))
-                mesh.export(os.path.join(obj_mesh_output, mesh_filename))
-                print(f"Mesh saved: {mesh_filename}")
+                mesh.export(os.path.join(obj_mesh_output, "frame_{}_obj{}.obj".format(frame_id, str(obj_id))))
+                print(f"Saved mesh for obj {obj_id} at frame {frame_id}")
 
         with performance_measure("saving ckpt"):
             if save_ckpt and ((((frame_id % cfg.n_vis_iter) == 0 or frame_id == dataset_len - 1) or
