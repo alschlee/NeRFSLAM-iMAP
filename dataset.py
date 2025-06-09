@@ -70,14 +70,13 @@ class Replica(Dataset):
             [image_transforms.DepthScale(cfg.depth_scale),
              image_transforms.DepthFilter(cfg.max_depth)])
 
-        # Get available frame indices from rgb directory
-        self.frame_indices = []
-        rgb_dir = os.path.join(self.root_dir, "rgb")
-        for filename in os.listdir(rgb_dir):
-            if filename.endswith('.jpg'):
-                frame_id = int(filename.split('.')[0])
-                self.frame_indices.append(frame_id)
-        self.frame_indices.sort()
+        # 실제 파일 목록을 가져와서 정렬
+        self.rgb_files = sorted([f for f in os.listdir(os.path.join(self.root_dir, "rgb")) if f.endswith('.jpg')], 
+                               key=lambda x: int(x.split('.')[0]))
+        self.depth_files = sorted([f for f in os.listdir(os.path.join(self.root_dir, "depth")) if f.endswith('.png')], 
+                                 key=lambda x: int(x.split('.')[0]))
+        
+        print(f"Found {len(self.rgb_files)} RGB files and {len(self.depth_files)} depth files")
 
         # background semantic classes: undefined--1, undefined-0 beam-5 blinds-12 curtain-30 ceiling-31 floor-40 pillar-60 vent-92 wall-93 wall-plug-95 window-97 rug-98
         self.background_cls_list = [5,12,30,31,40,60,92,93,95,97,98,79]
@@ -85,36 +84,123 @@ class Replica(Dataset):
         self.bbox_scale = 0.2  # 1 #1.5 0.9== s=1/9, s=0.2
 
     def __len__(self):
-        return len(self.frame_indices)
+        return min(len(self.rgb_files), len(self.depth_files))
 
     def __getitem__(self, idx):
-        frame_id = self.frame_indices[idx]
         bbox_dict = {}
-        rgb_file = os.path.join(self.root_dir, "rgb", str(frame_id) + ".jpg")
-        depth_file = os.path.join(self.root_dir, "depth", str(frame_id) + ".png")
         
-        depth = cv2.imread(depth_file, -1).astype(np.float32)
-        image = cv2.imread(rgb_file).astype(np.uint8)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # 실제 파일 이름 사용
+        if idx >= len(self.rgb_files) or idx >= len(self.depth_files):
+            print(f"Index {idx} out of range. RGB files: {len(self.rgb_files)}, Depth files: {len(self.depth_files)}")
+            return None
+            
+        rgb_file = os.path.join(self.root_dir, "rgb", self.rgb_files[idx])
+        depth_file = os.path.join(self.root_dir, "depth", self.depth_files[idx])
         
-        # Resize image to match depth dimensions
-        H, W = depth.shape
-        image = cv2.resize(image, (W, H), interpolation=cv2.INTER_LINEAR)
+        # 파일 존재 확인
+        if not os.path.exists(rgb_file):
+            print(f"RGB file not found: {rgb_file}")
+            return None
+        if not os.path.exists(depth_file):
+            print(f"Depth file not found: {depth_file}")
+            return None
         
-        # Create dummy object mask (all zeros for imap mode)
-        obj = np.zeros_like(depth, dtype=np.int32)
+        # iMAP 모드인 경우 semantic 파일들은 없을 수 있음
+        if not self.imap_mode:
+            # semantic 파일들도 동일한 번호로 존재해야 함
+            file_number = self.rgb_files[idx].split('.')[0]  # 파일명에서 숫자 추출
+            inst_file = os.path.join(self.root_dir, "semantic_instance", "semantic_instance_" + file_number + ".png")
+            obj_file = os.path.join(self.root_dir, "semantic_class", "semantic_class_" + file_number + ".png")
+            
+            if not os.path.exists(inst_file) or not os.path.exists(obj_file):
+                print(f"Semantic files not found for index {idx}, file number {file_number}")
+                # iMAP 모드로 폴백
+                self.imap_mode = True
+        
+        try:
+            depth = cv2.imread(depth_file, -1)
+            if depth is None:
+                print(f"Failed to read depth file: {depth_file}")
+                return None
+            depth = depth.astype(np.float32).transpose(1,0)
+            
+            image = cv2.imread(rgb_file)
+            if image is None:
+                print(f"Failed to read RGB file: {rgb_file}")
+                return None
+            image = image.astype(np.uint8)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).transpose(1,0,2)
+            
+        except Exception as e:
+            print(f"Error reading files: {e}")
+            return None
+
+        bbox_scale = self.bbox_scale
+
+        if self.imap_mode:
+            obj = np.zeros_like(depth).astype(np.int32)
+        else:
+            try:
+                obj = cv2.imread(obj_file, cv2.IMREAD_UNCHANGED)
+                if obj is None:
+                    print(f"Failed to read obj file: {obj_file}, switching to iMAP mode")
+                    obj = np.zeros_like(depth).astype(np.int32)
+                else:
+                    obj = obj.astype(np.int32).transpose(1,0)   # uint16 -> int32
+                
+                inst = cv2.imread(inst_file, cv2.IMREAD_UNCHANGED)
+                if inst is None:
+                    print(f"Failed to read inst file: {inst_file}, switching to iMAP mode")
+                    obj = np.zeros_like(depth).astype(np.int32)
+                else:
+                    inst = inst.astype(np.int32).transpose(1,0)  # uint16 -> int32
+                    
+                    obj_ = np.zeros_like(obj)
+                    inst_list = []
+                    batch_masks = []
+                    for inst_id in np.unique(inst):
+                        inst_mask = inst == inst_id
+                        sem_cls = np.unique(obj[inst_mask])  # sem label, only interested obj
+                        assert sem_cls.shape[0] != 0
+                        if sem_cls in self.background_cls_list:
+                            continue
+                        obj_mask = inst == inst_id
+                        batch_masks.append(obj_mask)
+                        inst_list.append(inst_id)
+                    
+                    if len(batch_masks) > 0:
+                        batch_masks = torch.from_numpy(np.stack(batch_masks))
+                        cmins, cmaxs, rmins, rmaxs = get_bbox2d_batch(batch_masks)
+
+                        for i in range(batch_masks.shape[0]):
+                            w = rmaxs[i] - rmins[i]
+                            h = cmaxs[i] - cmins[i]
+                            if w <= 10 or h <= 10:  # too small   todo
+                                continue
+                            bbox_enlarged = enlarge_bbox([rmins[i], cmins[i], rmaxs[i], cmaxs[i]], scale=bbox_scale,
+                                                         w=obj.shape[1], h=obj.shape[0])
+                            inst_id = inst_list[i]
+                            obj_[batch_masks[i]] = 1
+                            bbox_dict.update({inst_id: torch.from_numpy(np.array(
+                                [bbox_enlarged[1], bbox_enlarged[3], bbox_enlarged[0], bbox_enlarged[2]]))})  # bbox order
+
+                    inst[obj_ == 0] = 0  # for background
+                    obj = inst
+            except Exception as e:
+                print(f"Error processing semantic data: {e}, switching to iMAP mode")
+                obj = np.zeros_like(depth).astype(np.int32)
 
         bbox_dict.update({0: torch.from_numpy(np.array([int(0), int(obj.shape[0]), 0, int(obj.shape[1])]))})  # bbox order
 
-        T = self.Twc[idx]   # could change to ORB-SLAM pose or else
+        if idx >= len(self.Twc):
+            print(f"Trajectory index {idx} out of range. Using identity matrix.")
+            T = np.eye(4)
+        else:
+            T = self.Twc[idx]   # could change to ORB-SLAM pose or else
+            
         T_obj = np.eye(4)   # obj pose, if dynamic
         sample = {"image": image, "depth": depth, "T": T, "T_obj": T_obj,
-                  "obj": obj, "bbox_dict": bbox_dict, "frame_id": frame_id}
-
-        if image is None or depth is None:
-            print(rgb_file)
-            print(depth_file)
-            raise ValueError
+                  "obj": obj, "bbox_dict": bbox_dict, "frame_id": idx}
 
         if self.depth_transform:
             sample["depth"] = self.depth_transform(sample["depth"])
