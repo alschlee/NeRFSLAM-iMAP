@@ -1,7 +1,7 @@
 {
     "dataset": {
         "live": 0,
-        "path": "/mnt/c/Users/DS/Documents/RTAB-Map/space2",
+        "path": "/mnt/c/Users/DS/Documents/RTAB-Map/space3",
         "format": "Replica",
         "keep_alive": 20
     },
@@ -52,10 +52,10 @@
     "camera": {
         "w": 960,
         "h": 720,
-        "fx": 720.8887451171875,
-        "fy": 720.8887451171875,
-        "cx": 480.4523010253906,
-        "cy": 363.1259460449219,
+        "fx": 719.55517578125,
+        "fy": 719.55517578125,
+        "cx": 480.5543518066406,
+        "cy": 363.0099792480469,
         "mw": 0,
         "mh": 0
     },
